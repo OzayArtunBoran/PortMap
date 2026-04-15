@@ -1,0 +1,43 @@
+# PortMap configuration
+# Docs: https://github.com/ozayartunboran/portmap
+
+version: "1"
+
+defaults:
+  range: "3000-9999"
+  strategy: "nearest"    # nearest | sequential | random
+
+services:
+  frontend:
+    port: 3000
+    description: "React dev server"
+    command: "npm run dev"
+    health_check: "http://localhost:3000"
+
+  api:
+    port: 8080
+    description: "Go API server"
+    command: "go run ."
+    health_check: "http://localhost:8080/health"
+
+  database:
+    port: 5432
+    description: "PostgreSQL"
+    managed: false         # portmap won't start/stop this service
+
+  redis:
+    port: 6379
+    description: "Redis"
+    managed: false
+
+  maildev:
+    port: 1080
+    description: "MailDev SMTP testing"
+    command: "npx maildev"
+
+groups:
+  full-stack:
+    services: ["frontend", "api", "database", "redis"]
+
+  backend-only:
+    services: ["api", "database", "redis"]

@@ -1,0 +1,10 @@
+bin/
+*.db
+*.sqlite
+.env
+dist/
+node_modules/
+vendor/
+.DS_Store
+*.log
+*.tmp

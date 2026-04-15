@@ -1,0 +1,695 @@
+# ============================================================
+# PortMap — project-spec.yml
+# ============================================================
+# Yerel geliştirmede port çakışma çözücü CLI aracı
+# ============================================================
+
+project:
+  name: "portmap"
+  display_name: "PortMap"
+  tagline: "Never fight over ports again"
+  description: >
+    Local development port collision resolver. Shows what's running on each port,
+    detects conflicts, suggests free ports, and manages port assignments for all
+    your services via a config file. Every developer running multiple services
+    has faced "port 3000 already in use" — PortMap fixes that.
+  type: "open-source"
+  license: "MIT"
+  author:
+    name: "Özay Artun Boran"
+    email: "contact@ozayartunboran.com"
+    github: "ozayartunboran"
+    website: "https://ozayartunboran.com"
+  repo:
+    visibility: "public"
+    org: ""
+    url: "github.com/ozayartunboran/portmap"
+
+stack:
+  language: "go"
+  version: "1.22+"
+  go:
+    module: "github.com/ozayartunboran/portmap"
+    cli_framework: "cobra"
+    config_lib: "viper"
+    api_framework: "none"
+    db_driver: "none"
+    orm: "none"
+  python:
+    api_framework: ""
+    orm: ""
+    async: false
+    task_queue: ""
+    migration: ""
+  frontend:
+    enabled: false
+    framework: ""
+    language: ""
+    styling: ""
+    charts: ""
+    build_tool: ""
+    embed: false
+  database:
+    type: "none"
+    migrations: false
+  container:
+    docker: true
+    compose: false
+    compose_services: []
+
+features:
+  # ── Phase 2: Core Features ────────────────────────────
+  - name: "port_scanner"
+    description: "Tüm aktif TCP/UDP portları tara ve hangi process'in kullandığını göster"
+    phase: 2
+    priority: "must"
+    details: |
+      Platformlara göre port tarama stratejisi:
+      
+      Linux:
+      - /proc/net/tcp ve /proc/net/udp parse ederek aktif portları bul
+      - Her satırda: local_address (hex IP:port), inode
+      - /proc/{pid}/fd/ → socket inode eşleştirmesi ile PID bul
+      - /proc/{pid}/comm → process adı, /proc/{pid}/cmdline → tam komut
+      
+      macOS:
+      - `lsof -iTCP -iUDP -nP` çıktısını parse et
+      - Her satırda: COMMAND, PID, USER, FD, TYPE, DEVICE, SIZE, NODE, NAME
+      
+      Fallback (her ikisi için):
+      - net.Listen(":port") ile port kontrolü (hızlı ama PID yok)
+      
+      Struct tanımları:
+      ```go
+      type PortInfo struct {
+          Port        int       // Port numarası
+          Protocol    string    // "tcp" | "udp"
+          PID         int       // Process ID (bulunamazsa 0)
+          ProcessName string    // Process adı (bulunamazsa "unknown")
+          User        string    // Çalıştıran kullanıcı
+          State       string    // LISTEN | ESTABLISHED | TIME_WAIT | ...
+          CommandLine string    // Tam komut satırı
+          StartTime   time.Time // Process başlangıç zamanı
+      }
+      
+      type ScanResult struct {
+          Ports    []PortInfo
+          ScannedRange string   // "1-65535" veya "3000-9999"
+          Duration time.Duration
+          Platform string       // "linux" | "darwin"
+      }
+      ```
+      
+      Tarama seçenekleri:
+      - Belirli port: --port 3000
+      - Port aralığı: --range 3000-9999
+      - Well-known portlar: 80, 443, 3000, 3306, 5432, 6379, 8080, 8443, 9090, 27017
+      - Filtre: --filter "node" (process adına göre)
+      - TCP only / UDP only
+      
+      Edge case'ler:
+      - Root olmadan bazı portların PID'si bulunamayabilir → "unknown (requires root)"
+      - Çok hızlı açılıp kapanan portlar → timeout ile handle et
+      - IPv6 portları da dahil et
+
+  - name: "conflict_detector"
+    description: "Config dosyasındaki port atamaları ile aktif portları karşılaştır, çakışmaları tespit et"
+    phase: 2
+    priority: "must"
+    details: |
+      .portmap.yml'den beklenen port atamalarını oku ve aktif portlarla karşılaştır.
+      
+      Çakışma türleri:
+      ```go
+      type ConflictType string
+      const (
+          ConflictOccupied     ConflictType = "OCCUPIED"       // Port başka process kullanıyor
+          ConflictDuplicate    ConflictType = "DUPLICATE"      // Aynı port 2+ servise atanmış
+          ConflictRangeOverlap ConflictType = "RANGE_OVERLAP"  // Port aralıkları çakışıyor
+      )
+      
+      type Conflict struct {
+          Port            int
+          Type            ConflictType
+          ServiceName     string    // Config'deki servis adı
+          ExpectedService string    // Bu portu kullanması gereken
+          ActualProcess   string    // Şu an bu portu kullanan process
+          ActualPID       int
+          Suggestion      int       // Önerilen alternatif port
+          Message         string    // İnsan-okunur açıklama
+      }
+      
+      type CheckResult struct {
+          Conflicts    []Conflict
+          OKServices   []string    // Çakışması olmayan servisler
+          TotalChecked int
+      }
+      ```
+      
+      Kontrol akışı:
+      1. Config'den tüm servislerin port atamalarını al
+      2. Config içi kontrol: duplicate port ataması var mı?
+      3. Aktif portları tara
+      4. Her servisin portu aktif mi? Aktifse aynı servis mi, başka process mi?
+      5. Çakışma varsa → alternatif port öner (allocator kullanarak)
+      
+      Edge case'ler:
+      - Config'de tanımlı ama managed: false olan servisler (DB, Redis) — bunlar
+        çalışıyorsa çakışma değil, çalışmıyorsa uyarı ver
+
+  - name: "port_allocator"
+    description: "Otomatik boş port bulma ve atama"
+    phase: 2
+    priority: "must"
+    details: |
+      ```go
+      type AllocStrategy string
+      const (
+          StrategyNearest    AllocStrategy = "nearest"    // İstenen porta en yakın
+          StrategySequential AllocStrategy = "sequential" // İlk boş port
+          StrategyRandom     AllocStrategy = "random"     // Rastgele boş port
+      )
+      
+      type AllocRequest struct {
+          PreferredPort int           // İstenen port (0 = herhangi)
+          Range         PortRange     // Arama aralığı
+          Strategy      AllocStrategy // Strateji
+          Count         int           // Kaç port bulunacak (default 1)
+          Exclude       []int         // Bu portları hariç tut
+      }
+      
+      type PortRange struct {
+          Start int // default 3000
+          End   int // default 9999
+      }
+      ```
+      
+      Algoritma (nearest stratejisi):
+      1. preferred port'u kontrol et → boşsa döndür
+      2. preferred ± 1, ± 2, ... diye genişle
+      3. Range dışına çıkarsa hata
+      
+      Port'un boş olduğunu doğrulama:
+      - net.Listen(":{port}") ile bind dene
+      - Hemen kapat
+      - Başarılıysa port boş
+      
+      Edge case'ler:
+      - Tüm portlar dolu → hata: "no free ports in range"
+      - Root gerektiren portlar (1-1023) → uyarı ver
+      - Geçersiz port numarası (0, negatif, >65535) → validasyon hatası
+
+  - name: "config_manager"
+    description: ".portmap.yml dosyasını yönet — servis port atamaları"
+    phase: 2
+    priority: "must"
+    details: |
+      Config dosyası formatı (.portmap.yml):
+      ```yaml
+      version: "1"
+      defaults:
+        range: "3000-9999"
+        strategy: "nearest"    # nearest | sequential | random
+      services:
+        frontend:
+          port: 3000
+          description: "React dev server"
+          command: "npm run dev"
+          health_check: "http://localhost:3000"
+        api:
+          port: 8080
+          description: "Go API server"
+          command: "go run ."
+          health_check: "http://localhost:8080/health"
+        database:
+          port: 5432
+          description: "PostgreSQL"
+          managed: false       # portmap bu servisi başlatmaz
+        redis:
+          port: 6379
+          managed: false
+      groups:
+        full-stack:
+          services: ["frontend", "api", "database", "redis"]
+      ```
+      
+      ```go
+      type PortmapConfig struct {
+          Version  string                    `yaml:"version"`
+          Defaults ConfigDefaults            `yaml:"defaults"`
+          Services map[string]ServiceConfig  `yaml:"services"`
+          Groups   map[string]GroupConfig     `yaml:"groups"`
+      }
+      
+      type ConfigDefaults struct {
+          Range    string `yaml:"range"`    // "3000-9999"
+          Strategy string `yaml:"strategy"` // nearest | sequential | random
+      }
+      
+      type ServiceConfig struct {
+          Port        int    `yaml:"port"`
+          Description string `yaml:"description"`
+          Command     string `yaml:"command"`
+          HealthCheck string `yaml:"health_check"`
+          Managed     *bool  `yaml:"managed"` // nil = true (default)
+      }
+      
+      type GroupConfig struct {
+          Services []string `yaml:"services"`
+      }
+      ```
+      
+      Fonksiyonlar:
+      - LoadConfig(path) → config parse + validasyon
+      - SaveConfig(path, config) → YAML'e yaz
+      - AddService(name, port, desc) → servisi config'e ekle
+      - RemoveService(name) → servisi config'den sil
+      - UpdatePort(name, newPort) → port güncelle
+      - ValidateConfig() → duplicate port, geçersiz port, referans bütünlüğü
+      
+      Validasyon kuralları:
+      - Port 1-65535 aralığında olmalı
+      - Aynı port 2 servise atanamaz
+      - Group'taki tüm servisler tanımlı olmalı
+      - Range formatı geçerli olmalı: "start-end" ve start < end
+
+  - name: "process_info"
+    description: "Belirli bir port veya PID hakkında detaylı bilgi"
+    phase: 2
+    priority: "should"
+    details: |
+      ```go
+      type ProcessDetail struct {
+          PID         int
+          Name        string
+          CommandLine string
+          User        string
+          Ports       []int         // Dinlediği tüm portlar
+          CPUPercent  float64       // CPU kullanımı (%)
+          MemoryMB    float64       // Memory kullanımı (MB)
+          StartTime   time.Time
+          Uptime      time.Duration
+      }
+      ```
+      
+      Port → PID eşleştirmesi: scanner modülünü kullan
+      PID → detay: /proc/{pid}/stat, /proc/{pid}/status, /proc/{pid}/cmdline parse
+      
+      macOS'ta: `ps -p {pid} -o pid,pcpu,pmem,lstart,command`
+
+  - name: "output_formatters"
+    description: "Farklı çıktı formatları"
+    phase: 2
+    priority: "must"
+    details: |
+      ```go
+      type Formatter interface {
+          FormatScan(ScanResult) string
+          FormatCheck(CheckResult) string
+          FormatInfo(ProcessDetail) string
+      }
+      ```
+      
+      Formatlar:
+      1. Terminal (default): Renkli tablo (text/tabwriter)
+         - Renkler: boş=yeşil, kullanımda=sarı, çakışma=kırmızı
+         - Kolon: PORT | PROTO | PID | PROCESS | USER | STATE
+         - Severity highlight: çakışma satırları kırmızı arka plan
+      
+      2. JSON: Makineler için, pipe'lanabilir
+         - `portmap scan --format json | jq '.ports[] | select(.port == 3000)'`
+      
+      3. Markdown: Raporlama/dökümantasyon için
+         - Markdown tablo formatı
+      
+      4. Compact: Tek satır özet (scriptler için)
+         - `3000:node(1234) 8080:go(5678) 5432:postgres(910)`
+      
+      Renk yönetimi:
+      - --no-color flag'i: tüm ANSI escape kodlarını devre dışı bırak
+      - Pipe'a yazıyorsa otomatik renksiz (os.Stdout.Fd() ile terminal kontrolü)
+
+  # ── Phase 4: Watch Mode (TUI) ─────────────────────────
+  - name: "watch_mode"
+    description: "Sürekli port izleme modu (TUI)"
+    phase: 4
+    priority: "should"
+    details: |
+      `portmap watch` komutu:
+      - Terminal'de canlı güncellenen port tablosu
+      - Belirli aralıkta (default 2s) yeniden tara
+      - Değişiklikleri highlight et:
+        - Yeni port açıldı → yeşil highlight (3 saniye)
+        - Port kapandı → kırmızı highlight sonra satır kaybolur
+        - Çakışma tespit → kırmızı uyarı banner
+      - q tuşu ile çıkış
+      - Ctrl+C ile temiz çıkış
+      
+      Implementasyon:
+      - Basit ANSI escape kodları ile terminal kontrolü
+      - Alternatif: bubbletea veya termbox-go (dependency ekler)
+      - Tercih: basit ANSI — daha az dependency
+
+  - name: "port_kill"
+    description: "Belirli bir portu kullanan process'i öldür"
+    phase: 2
+    priority: "should"
+    details: |
+      `portmap kill <port>` komutu:
+      1. Port'u kullanan process'i bul
+      2. Process bilgisini göster (isim, PID, komut)
+      3. Onay iste: "Kill process {name} (PID {pid}) on port {port}? [y/N]"
+      4. --yes flag'i ile onaysız
+      5. Önce SIGTERM gönder, 5 saniye bekle
+      6. Hala çalışıyorsa ve --force varsa SIGKILL gönder
+      
+      Edge case'ler:
+      - Root process'i kill etmeye çalışma → izin hatası
+      - Kendi process'ini kill etmeye çalışma → uyar
+      - Port'ta process yok → "nothing running on port {port}"
+
+cli:
+  binary_name: "portmap"
+  commands:
+    - name: "scan"
+      description: "Scan active ports on this machine"
+      flags:
+        - name: "port"
+          short: "p"
+          type: "int"
+          default: "0"
+          description: "Scan specific port (0 = all)"
+        - name: "range"
+          short: "r"
+          type: "string"
+          default: "1-65535"
+          description: "Port range to scan (e.g. 3000-9999)"
+        - name: "format"
+          short: "f"
+          type: "string"
+          default: "terminal"
+          description: "Output format: terminal, json, markdown, compact"
+        - name: "filter"
+          type: "string"
+          default: ""
+          description: "Filter by process name (substring match)"
+        - name: "tcp-only"
+          type: "bool"
+          default: "false"
+          description: "Show only TCP ports"
+        - name: "udp-only"
+          type: "bool"
+          default: "false"
+          description: "Show only UDP ports"
+        - name: "listen-only"
+          type: "bool"
+          default: "false"
+          description: "Show only LISTEN state ports"
+
+    - name: "check"
+      description: "Check for port conflicts against config"
+      flags:
+        - name: "config"
+          short: "c"
+          type: "string"
+          default: ".portmap.yml"
+          description: "Config file path"
+        - name: "fix"
+          type: "bool"
+          default: "false"
+          description: "Auto-resolve conflicts by assigning free ports"
+        - name: "format"
+          short: "f"
+          type: "string"
+          default: "terminal"
+          description: "Output format"
+
+    - name: "find"
+      description: "Find free ports"
+      flags:
+        - name: "count"
+          short: "n"
+          type: "int"
+          default: "1"
+          description: "Number of free ports to find"
+        - name: "near"
+          type: "int"
+          default: "3000"
+          description: "Find ports near this number"
+        - name: "range"
+          short: "r"
+          type: "string"
+          default: "3000-9999"
+          description: "Search range"
+
+    - name: "info"
+      description: "Show detailed info about a port or process"
+      flags:
+        - name: "port"
+          short: "p"
+          type: "int"
+          default: "0"
+          description: "Port number"
+        - name: "pid"
+          type: "int"
+          default: "0"
+          description: "Process ID"
+        - name: "format"
+          short: "f"
+          type: "string"
+          default: "terminal"
+          description: "Output format"
+
+    - name: "init"
+      description: "Create a .portmap.yml config file"
+      flags:
+        - name: "detect"
+          short: "d"
+          type: "bool"
+          default: "false"
+          description: "Auto-detect running services and populate config"
+
+    - name: "add"
+      description: "Add a service to config"
+      flags:
+        - name: "port"
+          short: "p"
+          type: "int"
+          default: "0"
+          description: "Port number (0 = auto-assign)"
+        - name: "description"
+          short: "d"
+          type: "string"
+          default: ""
+          description: "Service description"
+        - name: "command"
+          type: "string"
+          default: ""
+          description: "Start command for this service"
+
+    - name: "remove"
+      description: "Remove a service from config"
+
+    - name: "list"
+      description: "List all services from config with their port status"
+      flags:
+        - name: "format"
+          short: "f"
+          type: "string"
+          default: "terminal"
+          description: "Output format"
+
+    - name: "watch"
+      description: "Live port monitoring"
+      flags:
+        - name: "interval"
+          short: "i"
+          type: "int"
+          default: "2"
+          description: "Refresh interval in seconds"
+        - name: "range"
+          short: "r"
+          type: "string"
+          default: "1-65535"
+          description: "Port range to watch"
+
+    - name: "kill"
+      description: "Kill process occupying a specific port"
+      flags:
+        - name: "force"
+          type: "bool"
+          default: "false"
+          description: "Force kill (SIGKILL instead of SIGTERM)"
+        - name: "yes"
+          short: "y"
+          type: "bool"
+          default: "false"
+          description: "Skip confirmation prompt"
+
+api:
+  prefix: ""
+  auth:
+    type: "none"
+    providers: []
+    roles: []
+  endpoints: []
+
+database_schema:
+  tables: []
+
+notifications:
+  enabled: false
+  channels:
+    slack:
+      enabled: false
+    email:
+      enabled: false
+    discord:
+      enabled: false
+    telegram:
+      enabled: false
+  events: []
+  escalation:
+    enabled: false
+    chain: []
+
+ci_cd:
+  github_actions:
+    enabled: true
+    workflows:
+      - name: "ci"
+        triggers: ["push", "pull_request"]
+        jobs: ["lint", "test", "build"]
+      - name: "release"
+        triggers: ["tag"]
+        jobs: ["goreleaser"]
+  pre_commit:
+    enabled: true
+    hooks: ["vet", "test"]
+
+docker:
+  dockerfile:
+    multi_stage: true
+    stages: ["builder", "runtime"]
+    base_images: ["golang:1.22-alpine", "alpine:3.19"]
+    expose_port: 0
+    health_check: ""
+  compose:
+    services: []
+
+deployment:
+  target: "github-release"
+  domain: ""
+  subdomain: ""
+  ssl:
+    provider: ""
+    method: ""
+  reverse_proxy: ""
+  demo_mode:
+    enabled: false
+
+file_structure:
+  tree: |
+    portmap/
+    ├── CLAUDE.md
+    ├── project-spec.yml
+    ├── skills/
+    │   ├── project-init.md
+    │   ├── go-cli.md
+    │   ├── testing.md
+    │   ├── docker.md
+    │   ├── ci-cd.md
+    │   ├── readme-generator.md
+    │   ├── github-setup.md
+    │   └── quality-checks.md
+    ├── cmd/
+    │   ├── root.go
+    │   ├── scan.go
+    │   ├── check.go
+    │   ├── find.go
+    │   ├── info.go
+    │   ├── init_cmd.go
+    │   ├── add.go
+    │   ├── remove.go
+    │   ├── list.go
+    │   ├── watch.go
+    │   └── kill.go
+    ├── internal/
+    │   ├── config/
+    │   │   └── config.go
+    │   ├── scanner/
+    │   │   ├── scanner.go      # Scanner interface + ScanResult
+    │   │   ├── linux.go        # Linux: /proc/net/tcp parser
+    │   │   └── darwin.go       # macOS: lsof parser
+    │   ├── detector/
+    │   │   └── detector.go     # Conflict detection logic
+    │   ├── allocator/
+    │   │   └── allocator.go    # Free port finder
+    │   ├── process/
+    │   │   └── process.go      # Process detail lookup
+    │   └── formatter/
+    │       ├── formatter.go    # Formatter interface
+    │       ├── terminal.go     # Colored table output
+    │       ├── json.go         # JSON output
+    │       ├── markdown.go     # Markdown table output
+    │       └── compact.go      # One-line compact output
+    ├── .portmap.example.yml
+    ├── main.go
+    ├── go.mod
+    ├── go.sum
+    ├── Makefile
+    ├── Dockerfile
+    ├── .goreleaser.yml
+    ├── .gitignore
+    ├── LICENSE
+    ├── README.md
+    ├── CONTRIBUTING.md
+    └── .github/
+        ├── workflows/
+        │   ├── ci.yml
+        │   └── release.yml
+        └── ISSUE_TEMPLATE/
+            ├── bug_report.md
+            └── feature_request.md
+
+quality:
+  build_command: "make build"
+  test_command: "make test"
+  lint_command: "make lint"
+  min_test_coverage: 0
+  conventional_commits: true
+  makefile_targets:
+    - "build"
+    - "test"
+    - "lint"
+    - "clean"
+    - "install"
+
+readme:
+  language: "en"
+  sections:
+    - "header"
+    - "problem"
+    - "solution"
+    - "quick_start"
+    - "configuration"
+    - "usage"
+    - "docker"
+    - "ci_cd"
+    - "contributing"
+    - "license"
+    - "footer"
+  badges:
+    - "go_version"
+    - "license"
+    - "ci_status"
+
+skills:
+  - "project-init"
+  - "go-cli"
+  - "testing"
+  - "docker"
+  - "ci-cd"
+  - "readme-generator"
+  - "github-setup"
+  - "quality-checks"
