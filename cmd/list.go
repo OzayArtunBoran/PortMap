@@ -2,9 +2,13 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"github.com/ozayartunboran/portmap/internal/allocator"
 	"github.com/ozayartunboran/portmap/internal/config"
 )
 
@@ -36,11 +40,31 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// TODO: Phase 2 — check port status with scanner, format with formatter
-	for name, svc := range cfg.Services {
-		status := "unknown"
-		fmt.Printf("  %-20s :%d  %s  %s\n", name, svc.Port, status, svc.Description)
+	// Sort service names for consistent output
+	names := make([]string, 0, len(cfg.Services))
+	for name := range cfg.Services {
+		names = append(names, name)
 	}
+	sort.Strings(names)
 
+	var b strings.Builder
+	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "SERVICE\tPORT\tSTATUS\tDESCRIPTION\n")
+
+	for _, name := range names {
+		svc := cfg.Services[name]
+		status := "free"
+		if svc.Port > 0 && !allocator.IsPortFree(svc.Port) {
+			status = "in-use"
+		}
+		managed := ""
+		if !svc.IsManaged() {
+			managed = " (unmanaged)"
+		}
+		fmt.Fprintf(w, "%s\t%d\t%s\t%s%s\n", name, svc.Port, status, svc.Description, managed)
+	}
+	w.Flush()
+
+	fmt.Print(b.String())
 	return nil
 }

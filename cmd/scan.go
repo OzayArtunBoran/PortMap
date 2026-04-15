@@ -4,6 +4,10 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ozayartunboran/portmap/internal/config"
+	"github.com/ozayartunboran/portmap/internal/formatter"
+	"github.com/ozayartunboran/portmap/internal/scanner"
 )
 
 var scanFlags struct {
@@ -36,8 +40,32 @@ func init() {
 }
 
 func runScan(cmd *cobra.Command, args []string) error {
-	// TODO: Phase 2 — implement with scanner + formatter
-	fmt.Println("Scanning ports...")
-	fmt.Printf("Range: %s, Format: %s\n", scanFlags.portRange, scanFlags.format)
+	portRange, err := config.ParseRange(scanFlags.portRange)
+	if err != nil {
+		return fmt.Errorf("invalid range: %w", err)
+	}
+
+	opts := scanner.ScanOptions{
+		Port:       scanFlags.port,
+		RangeStart: portRange.Start,
+		RangeEnd:   portRange.End,
+		TCPOnly:    scanFlags.tcpOnly,
+		UDPOnly:    scanFlags.udpOnly,
+		ListenOnly: scanFlags.listenOnly,
+		Filter:     scanFlags.filter,
+	}
+
+	scn := scanner.New()
+	result, err := scn.Scan(opts)
+	if err != nil {
+		return fmt.Errorf("scan failed: %w", err)
+	}
+
+	fmtr, err := formatter.New(scanFlags.format, noColor)
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(fmtr.FormatScan(result))
 	return nil
 }

@@ -174,3 +174,76 @@ func (c *PortmapConfig) Validate() error {
 
 	return nil
 }
+
+// AddService adds a service to the config with validation
+func (c *PortmapConfig) AddService(name string, svc ServiceConfig) error {
+	if _, exists := c.Services[name]; exists {
+		return fmt.Errorf("service %q already exists", name)
+	}
+	if svc.Port < 0 || svc.Port > 65535 {
+		return fmt.Errorf("port %d out of range (1-65535)", svc.Port)
+	}
+	// Check for port conflicts
+	if svc.Port > 0 {
+		for existingName, existingSvc := range c.Services {
+			if existingSvc.Port == svc.Port {
+				return fmt.Errorf("port %d already assigned to %q", svc.Port, existingName)
+			}
+		}
+	}
+	c.Services[name] = svc
+	return nil
+}
+
+// RemoveService removes a service and cleans up group references
+func (c *PortmapConfig) RemoveService(name string) error {
+	if _, exists := c.Services[name]; !exists {
+		return fmt.Errorf("service %q not found", name)
+	}
+	delete(c.Services, name)
+
+	// Clean up group references
+	for gName, group := range c.Groups {
+		filtered := make([]string, 0, len(group.Services))
+		for _, s := range group.Services {
+			if s != name {
+				filtered = append(filtered, s)
+			}
+		}
+		group.Services = filtered
+		c.Groups[gName] = group
+	}
+
+	return nil
+}
+
+// UpdatePort updates a service's port with validation
+func (c *PortmapConfig) UpdatePort(name string, newPort int) error {
+	svc, exists := c.Services[name]
+	if !exists {
+		return fmt.Errorf("service %q not found", name)
+	}
+	if newPort < 1 || newPort > 65535 {
+		return fmt.Errorf("port %d out of range (1-65535)", newPort)
+	}
+	// Check for conflicts
+	for existingName, existingSvc := range c.Services {
+		if existingName != name && existingSvc.Port == newPort {
+			return fmt.Errorf("port %d already assigned to %q", newPort, existingName)
+		}
+	}
+	svc.Port = newPort
+	c.Services[name] = svc
+	return nil
+}
+
+// GetServicePorts returns a port → service name mapping
+func (c *PortmapConfig) GetServicePorts() map[int]string {
+	result := make(map[int]string)
+	for name, svc := range c.Services {
+		if svc.Port > 0 {
+			result[svc.Port] = name
+		}
+	}
+	return result
+}

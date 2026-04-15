@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ozayartunboran/portmap/internal/config"
+	"github.com/ozayartunboran/portmap/internal/scanner"
 )
 
 var initFlags struct {
@@ -52,8 +53,30 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	if initFlags.detect {
-		// TODO: Phase 2 — auto-detect running services using scanner
 		fmt.Println("Auto-detecting running services...")
+		scn := scanner.New()
+		result, err := scn.Scan(scanner.ScanOptions{
+			ListenOnly: true,
+			RangeStart: 1024,
+			RangeEnd:   65535,
+		})
+		if err == nil && len(result.Ports) > 0 {
+			for _, p := range result.Ports {
+				if p.ProcessName == "" || p.ProcessName == "unknown (requires root)" {
+					continue
+				}
+				name := strings.ToLower(p.ProcessName)
+				// Avoid duplicates
+				if _, exists := cfg.Services[name]; exists {
+					continue
+				}
+				cfg.Services[name] = config.ServiceConfig{
+					Port:        p.Port,
+					Description: fmt.Sprintf("Auto-detected %s", p.ProcessName),
+				}
+			}
+			fmt.Printf("Detected %d service(s)\n", len(cfg.Services))
+		}
 	}
 
 	if err := config.SaveConfig(cfgFile, cfg); err != nil {

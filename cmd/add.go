@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ozayartunboran/portmap/internal/allocator"
 	"github.com/ozayartunboran/portmap/internal/config"
 )
 
@@ -38,26 +39,51 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	if _, exists := cfg.Services[name]; exists {
-		return fmt.Errorf("service %q already exists", name)
+	port := addFlags.port
+	if port == 0 {
+		// Auto-assign a port
+		defaultRange, err := config.ParseRange(cfg.Defaults.Range)
+		if err != nil {
+			defaultRange = config.PortRange{Start: 3000, End: 9999}
+		}
+
+		// Exclude ports already in use by config
+		var exclude []int
+		for _, svc := range cfg.Services {
+			if svc.Port > 0 {
+				exclude = append(exclude, svc.Port)
+			}
+		}
+
+		alloc := allocator.New()
+		ports, err := alloc.FindFree(allocator.AllocRequest{
+			Range:    defaultRange,
+			Strategy: allocator.AllocStrategy(cfg.Defaults.Strategy),
+			Count:    1,
+			Exclude:  exclude,
+		})
+		if err != nil {
+			return fmt.Errorf("auto-assign port: %w", err)
+		}
+		port = ports[0]
 	}
 
 	managed := true
 	svc := config.ServiceConfig{
-		Port:        addFlags.port,
+		Port:        port,
 		Description: addFlags.description,
 		Command:     addFlags.command,
 		Managed:     &managed,
 	}
 
-	// TODO: Phase 2 — if port == 0, use allocator to auto-assign
-
-	cfg.Services[name] = svc
+	if err := cfg.AddService(name, svc); err != nil {
+		return err
+	}
 
 	if err := config.SaveConfig(cfgFile, cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 
-	fmt.Printf("Added service %q on port %d\n", name, svc.Port)
+	fmt.Printf("Added service %q on port %d\n", name, port)
 	return nil
 }

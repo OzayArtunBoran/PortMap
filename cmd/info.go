@@ -4,6 +4,9 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ozayartunboran/portmap/internal/formatter"
+	"github.com/ozayartunboran/portmap/internal/process"
 )
 
 var infoFlags struct {
@@ -31,7 +34,24 @@ func runInfo(cmd *cobra.Command, args []string) error {
 	if infoFlags.port == 0 && infoFlags.pid == 0 {
 		return fmt.Errorf("specify --port or --pid")
 	}
-	// TODO: Phase 2 — implement with scanner + process
-	fmt.Printf("Getting info for port=%d pid=%d\n", infoFlags.port, infoFlags.pid)
+
+	var detail *process.ProcessDetail
+	var err error
+
+	if infoFlags.port > 0 {
+		detail, err = process.GetByPort(infoFlags.port)
+	} else {
+		detail, err = process.GetByPID(infoFlags.pid)
+	}
+	if err != nil {
+		return err
+	}
+
+	fmtr, err := formatter.New(infoFlags.format, noColor)
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(fmtr.FormatInfo(detail))
 	return nil
 }

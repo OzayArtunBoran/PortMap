@@ -4,6 +4,9 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ozayartunboran/portmap/internal/allocator"
+	"github.com/ozayartunboran/portmap/internal/config"
 )
 
 var findFlags struct {
@@ -28,7 +31,24 @@ func init() {
 }
 
 func runFind(cmd *cobra.Command, args []string) error {
-	// TODO: Phase 2 — implement with allocator
-	fmt.Printf("Finding %d free port(s) near %d in range %s\n", findFlags.count, findFlags.near, findFlags.portRange)
+	portRange, err := config.ParseRange(findFlags.portRange)
+	if err != nil {
+		return fmt.Errorf("invalid range: %w", err)
+	}
+
+	alloc := allocator.New()
+	ports, err := alloc.FindFree(allocator.AllocRequest{
+		PreferredPort: findFlags.near,
+		Range:         portRange,
+		Strategy:      allocator.StrategyNearest,
+		Count:         findFlags.count,
+	})
+	if err != nil {
+		return fmt.Errorf("find free ports: %w", err)
+	}
+
+	for _, port := range ports {
+		fmt.Println(port)
+	}
 	return nil
 }

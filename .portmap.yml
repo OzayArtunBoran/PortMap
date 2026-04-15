@@ -1,0 +1,9 @@
+# PortMap configuration
+# Docs: https://github.com/ozayartunboran/portmap
+
+version: "1"
+defaults:
+    range: 3000-9999
+    strategy: nearest
+services: {}
+groups: {}
