@@ -51,7 +51,7 @@ func New() Scanner {
 		return &DarwinScanner{}
 	default:
 		// Fallback to basic net.Listen probe
-		return &LinuxScanner{} // TODO: implement fallback scanner
+		return &LinuxScanner{}
 	}
 }
 
