@@ -1,0 +1,12 @@
+.git
+.gitignore
+*.md
+!README.md
+skills/
+bin/
+dist/
+.env
+.env.*
+*.db
+*.sqlite
+.DS_Store

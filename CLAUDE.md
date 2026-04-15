@@ -98,5 +98,5 @@ make lint     # → golangci-lint (veya go vet)
 - [x] Phase 3: Tests
 - [x] Phase 4: API/UI (watch mode)
 - [ ] Phase 5: Notifications (N/A — skip)
-- [ ] Phase 6: Docker + CI/CD
+- [x] Phase 6: Docker + CI/CD
 - [ ] Phase 7: README + GitHub
